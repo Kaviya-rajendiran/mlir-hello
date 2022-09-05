@@ -49,4 +49,36 @@ mlir::Operation *HelloDialect::materializeConstant(mlir::OpBuilder &builder,
                                                  mlir::Location loc) {
     return builder.create<hello::ConstantOp>(loc, type,
                                       value.cast<mlir::DenseElementsAttr>());
+
 }
+
+// AddOps
+
+void hello::AddOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
+                  mlir::Value lhs, mlir::Value rhs) {
+  state.addTypes(UnrankedTensorType::get(builder.getF64Type()));
+  state.addOperands({lhs, rhs});
+  
+} 
+/*
+void hello::AddOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
+                  mlir::Value lhs, mlir::Value rhs) {
+  auto dataType = UnrankedTensorType::get({}, builder.getF64Type());
+  state.addOperands({lhs, rhs});
+  hello::AddOp::build(builder, state, dataType, dataAttribute);
+  
+}*/
+
+
+/*
+mlir::ParseResult AddOp::parse(mlir::OpAsmParser &parser,
+                               mlir::OperationState &result) {
+  return parseBinaryOp(parser, result);
+} */
+
+//void AddOp::print(mlir::OpAsmPrinter &p) { printBinaryOp(p, *this); }
+
+/// Infer the output shape of the AddOp, this is required by the shape inference
+/// interface.
+
+

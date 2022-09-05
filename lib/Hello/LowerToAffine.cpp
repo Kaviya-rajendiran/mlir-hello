@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include "mlir/IR/BuiltinDialect.h"
 #include "Hello/HelloDialect.h"
 #include "Hello/HelloOps.h"
 #include "Hello/HelloPasses.h"
@@ -26,6 +27,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/Sequence.h"
+
+using namespace mlir;
 
 static mlir::MemRefType convertTensorToMemRef(mlir::TensorType type) {
   assert(type.hasRank() && "expected only ranked shapes");
@@ -97,6 +100,7 @@ class ConstantOpLowering : public mlir::OpRewritePattern<hello::ConstantOp> {
     std::function<void(uint64_t)> storeElements = [&](uint64_t dimension) {
       // The last dimension is the base case of the recursion, at this point
       // we store the element at the given index.
+    
       if (dimension == valueShape.size()) {
         rewriter.create<mlir::AffineStoreOp>(
             loc, rewriter.create<mlir::arith::ConstantOp>(loc, *valueIt++), alloc,
@@ -122,6 +126,148 @@ class ConstantOpLowering : public mlir::OpRewritePattern<hello::ConstantOp> {
   }
 };
 
+class ConstantOp2Lowering : public mlir::OpRewritePattern<hello::ConstantOp2> {
+  using OpRewritePattern<hello::ConstantOp2>::OpRewritePattern;
+
+  mlir::LogicalResult matchAndRewrite(hello::ConstantOp2 op, mlir::PatternRewriter &rewriter) const final {
+    mlir::DenseElementsAttr constantValue = op.value();
+    mlir::Location loc = op.getLoc();
+
+    // When lowering the constant operation, we allocate and assign the constant
+    // values to a corresponding memref allocation.
+    auto tensorType = op.getType().cast<mlir::TensorType>();
+    auto memRefType = convertTensorToMemRef(tensorType);
+    auto alloc = insertAllocAndDealloc(memRefType, loc, rewriter);
+
+    // We will be generating constant indices up-to the largest dimension.
+    // Create these constants up-front to avoid large amounts of redundant
+    // operations.
+    auto valueShape = memRefType.getShape();
+    mlir::SmallVector<mlir::Value, 8> constantIndices;
+
+    if (!valueShape.empty()) {
+      for (auto i : llvm::seq<int64_t>(
+          0, *std::max_element(valueShape.begin(), valueShape.end())))
+        constantIndices.push_back(rewriter.create<mlir::arith::ConstantIndexOp>(loc, i));
+    } else {
+      // This is the case of a tensor of rank 0.
+      constantIndices.push_back(rewriter.create<mlir::arith::ConstantIndexOp>(loc, 0));
+    }
+    // The constant operation represents a multi-dimensional constant, so we
+    // will need to generate a store for each of the elements. The following
+    // functor recursively walks the dimensions of the constant shape,
+    // generating a store when the recursion hits the base case.
+
+    // [4, 3] (1, 2, 3, 4, 5, 6, 7, 8)
+    // storeElements(0)
+    //   indices = [0]
+    //   storeElements(1)
+    //     indices = [0, 0]
+    //     storeElements(2)
+    //       store (const 1) [0, 0]
+    //     indices = [0]
+    //     indices = [0, 1]
+    //     storeElements(2)
+    //       store (const 2) [0, 1]
+    //  ...
+    //
+    mlir::SmallVector<mlir::Value, 2> indices;
+    auto valueIt = constantValue.getValues<mlir::FloatAttr>().begin();
+    std::function<void(uint64_t)> storeElements = [&](uint64_t dimension) {
+      // The last dimension is the base case of the recursion, at this point
+      // we store the element at the given index.
+      if (dimension == valueShape.size()) {
+        rewriter.create<mlir::AffineStoreOp>(
+            loc, rewriter.create<mlir::arith::ConstantOp>(loc, *valueIt++), alloc,
+            llvm::makeArrayRef(indices));
+        printf("hello");
+        return;
+      }
+
+      // Otherwise, iterate over the current dimension and add the indices to
+      // the list.
+      for (uint64_t i = 0, e = valueShape[dimension]; i != e; ++i) {
+        indices.push_back(constantIndices[i]);
+        storeElements(dimension + 1);
+        indices.pop_back();
+      }
+    };
+
+    // Start the element storing recursion from the first dimension. */
+ //   storeElements(/*dimension=*/0); 
+
+    // Replace this operation with the generated alloc.
+    rewriter.replaceOp(op, alloc);
+    return mlir::success(); 
+  }
+}; 
+using LoopIterationFn = function_ref<Value(mlir::OpBuilder &rewriter, mlir::ValueRange memRefOperands, mlir::ValueRange loopIvs)>;
+
+static void lowerOpToLoops(mlir::Operation *op, mlir::ValueRange operands,
+                           mlir::PatternRewriter &rewriter,
+                           LoopIterationFn processIteration) {
+  auto tensorType = (*op->result_type_begin()).cast<mlir::TensorType>();
+  auto loc = op->getLoc();
+
+  // Insert an allocation and deallocation for the result of this operation.
+  auto memRefType = convertTensorToMemRef(tensorType);
+  auto alloc = insertAllocAndDealloc(memRefType, loc, rewriter);
+
+  // Create a nest of affine loops, with one loop per dimension of the shape.
+  // The buildAffineLoopNest function takes a callback that is used to construct
+  // the body of the innermost loop given a builder, a location and a range of
+  // loop induction variables.
+  SmallVector<int64_t, 4> lowerBounds(tensorType.getRank(), /*Value=*/0);
+  SmallVector<int64_t, 4> steps(tensorType.getRank(), /*Value=*/1);
+  buildAffineLoopNest(
+      rewriter, loc, lowerBounds, tensorType.getShape(), steps,
+      [&](OpBuilder &nestedBuilder, Location loc, ValueRange ivs) {
+        // Call the processing function with the rewriter, the memref operands,
+        // and the loop induction variables. This function will return the value
+        // to store at the current index.
+        Value valueToStore = processIteration(nestedBuilder, operands, ivs);
+        nestedBuilder.create<AffineStoreOp>(loc, valueToStore, alloc, ivs);
+      });
+
+  // Replace this operation with the generated alloc.
+  rewriter.replaceOp(op, alloc);
+}
+//template <typename AddOp, typename LoweredAddOp>
+struct AddOpLowering : public mlir::ConversionPattern {
+  //using ConversionPattern<hello::AddOp>::ConversionPattern;
+  AddOpLowering(mlir::MLIRContext *ctx): mlir::ConversionPattern(hello::AddOp::getOperationName(), 1, ctx) {}
+
+  mlir::LogicalResult 
+  matchAndRewrite(mlir::Operation *op, mlir::ArrayRef<mlir::Value> operands,
+                  mlir::ConversionPatternRewriter &rewriter) const final{
+    auto loc = op->getLoc();
+    lowerOpToLoops(op, operands, rewriter,
+                   [loc](mlir::OpBuilder &builder, mlir::ValueRange memRefOperands,
+                         mlir::ValueRange loopIvs) {
+                     // Generate an adaptor for the remapped operands of the
+                     // BinaryOp. This allows for using the nice named accessors
+                     // that are generated by the ODS.
+                     //typename BinaryOp::Adaptor binaryAdaptor(memRefOperands);
+                     hello::AddOpAdaptor addAdaptor(memRefOperands);
+                    // mlir::Value input = addAdaptor.input();
+
+
+                     // Generate loads for the element of 'lhs' and 'rhs' at the
+                     // inner loop.
+                     auto loadedLhs = builder.create<mlir::AffineLoadOp>(
+                         loc, addAdaptor.lhs(), loopIvs);
+                     auto loadedRhs = builder.create<mlir::AffineLoadOp>(
+                         loc, addAdaptor.rhs(), loopIvs);
+
+                     // Create the binary operation performed on the loaded
+                     // values.
+                     return builder.create<arith::AddFOp>(loc, loadedLhs,loadedRhs);
+                   });
+    return mlir::success();
+  }
+};
+
+//using AddOpLowering = BinaryOpLowering<toy::AddOp, arith::AddFOp>;
 class PrintOpLowering : public mlir::OpConversionPattern<hello::PrintOp> {
   using OpConversionPattern<hello::PrintOp>::OpConversionPattern;
 
@@ -159,8 +305,12 @@ void HelloToAffineLowerPass::runOnOperation() {
                            [](mlir::Type type) { return type.isa<mlir::TensorType>(); });
   });
 
+
   mlir::RewritePatternSet patterns(&getContext());
-  patterns.add<ConstantOpLowering, PrintOpLowering>(&getContext());
+  patterns.add<PrintOpLowering,ConstantOpLowering,ConstantOp2Lowering,AddOpLowering>(patterns.getContext());
+
+
+  
 
   if (mlir::failed(mlir::applyPartialConversion(getOperation(), target, std::move(patterns)))) {
     signalPassFailure();
