@@ -25,6 +25,16 @@
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "mlir/Dialect/LLVMIR/Transforms/Passes.h"
+
+//#include "mlir/Dialect/StandardOps/Transforms/Passes.h"
+#include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Dialect/SCF/Transforms/Passes.h"
+#include "mlir/Conversion/Passes.h"
+#include "mlir/IR/OperationSupport.h"
+#include "mlir/Transforms/Passes.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/InitAllPasses.h"
 
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
@@ -34,6 +44,7 @@
 
 #include "Hello/HelloDialect.h"
 #include "Hello/HelloPasses.h"
+#include <iostream>
 
 namespace cl = llvm::cl;
 static cl::opt<std::string> inputFilename(cl::Positional,
@@ -91,16 +102,43 @@ int loadAndProcessMLIR(mlir::MLIRContext &context, mlir::OwningOpRef<mlir::Modul
   }
 
   // Register passes to be applied in this compile process
-  mlir::PassManager passManager(&context);
+  mlir::PassManager passManager(&context,"builtin.module");
   mlir::applyPassManagerCLOptions(passManager);
-
-  passManager.addPass(hello::createLowerToAffinePass());
+ 
+  passManager.addPass(hello::createLowerToTosaPass());
+  passManager.addPass(mlir::tosa::createTosaToArith());
+  passManager.addPass(mlir::arith::createArithmeticBufferizePass());
+  passManager.addNestedPass<mlir::func::FuncOp>(mlir::tosa::createTosaToLinalg());
+  passManager.addNestedPass<mlir::func::FuncOp>(mlir::createLinalgBufferizePass());
+  passManager.addPass(mlir::func::createFuncBufferizePass());
+  passManager.addNestedPass<mlir::func::FuncOp>(mlir::createConvertLinalgToAffineLoopsPass());  
+  passManager.addPass(mlir::createMemRefToLLVMPass());
   passManager.addPass(hello::createLowerToLLVMPass());
+  passManager.addPass(mlir::createReconcileUnrealizedCastsPass());
+
+// The output can be achieved using another set of passes as mentioned below:
+
+
+  /*
+  passManager.addPass(hello::createLowerToTosaPass());
+  passManager.addPass(mlir::tosa::createTosaToArith());
+  passManager.addPass(mlir::arith::createArithmeticBufferizePass());
+  passManager.addNestedPass<mlir::func::FuncOp>(mlir::tosa::createTosaToLinalg());
+  passManager.addNestedPass<mlir::func::FuncOp>(mlir::createLinalgBufferizePass());
+  passManager.addPass(mlir::func::createFuncBufferizePass());
+  passManager.addNestedPass<mlir::func::FuncOp>(mlir::createConvertLinalgToLoopsPass());
+  passManager.addNestedPass<mlir::func::FuncOp>(mlir::createConvertSCFToCFPass());
+  passManager.addPass(mlir::createMemRefToLLVMPass());
+  passManager.addPass(mlir::createConvertFuncToLLVMPass());
+  passManager.addPass(hello::createLowerToLLVMPass());
+  passManager.addPass(mlir::createReconcileUnrealizedCastsPass());
+*/
+  //passManager.addPass(mlir::LLVM::createLegalizeForExportPass() );
 
   if (mlir::failed(passManager.run(*module))) {
     return 4;
   }
-
+  //llvm::outs() << *module << "\n";
   return 0;
 }
 
@@ -142,14 +180,17 @@ int main(int argc, char **argv) {
   mlir::MLIRContext context;
   context.getOrLoadDialect<hello::HelloDialect>();
   context.getOrLoadDialect<mlir::func::FuncDialect>();
-
+  context.getOrLoadDialect<mlir::tosa::TosaDialect>();
+  context.getOrLoadDialect<mlir::AffineDialect>();
+ 
+ 
   mlir::OwningOpRef<mlir::ModuleOp> module;
   if (int error = loadAndProcessMLIR(context, module)) {
     return error;
   }
 
   dumpLLVMIR(*module);
-//  runJit(*module);
+  runJit(*module);
 
   return 0;
 }

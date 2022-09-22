@@ -1,8 +1,11 @@
 #ifndef HELLO_OPS
 #define HELLO_OPS
 
+include "mlir/IR/OpBase.td"
 include "HelloDialect.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+
+def F32ElementsAttr : FloatElementsAttr<32>;
 
 def ConstantOp : Hello_Op<"constant", [NoSideEffect]> {
   let summary = "constant";
@@ -21,12 +24,26 @@ def ConstantOp : Hello_Op<"constant", [NoSideEffect]> {
     OpBuilder<(ins "mlir::DenseElementsAttr":$value), [{
       build($_builder, $_state, value.getType(), value);
     }]>,
-    OpBuilder<(ins "double":$value)>
+    OpBuilder<(ins "float":$value)>
   ];
 
 //  let parser = [{ return ::parseConstantOp(parser, result); }];
-  let arguments = (ins F64ElementsAttr:$value);
-  let results = (outs F64Tensor);
+  let arguments = (ins F32ElementsAttr:$value);
+  let results = (outs F32Tensor);
+}
+
+def AddOp : Hello_Op<"Add", [NoSideEffect]>{
+   let summary = "add operation";
+    let description = [{
+        The "add" builtin operation takes 2 inputs and add it and generate the result.
+    }];
+
+    let arguments = (ins F32Tensor:$lhs, F32Tensor:$rhs);
+    let results = (outs F32Tensor);
+
+     let builders = [
+    OpBuilder<(ins "mlir::Value":$lhs, "mlir::Value":$rhs)>
+  ];
 }
 
 def PrintOp : Hello_Op<"print", [NoSideEffect]> {
@@ -37,7 +54,7 @@ def PrintOp : Hello_Op<"print", [NoSideEffect]> {
     }];
 
     // The print operation takes an input tensor to print.
-    let arguments = (ins AnyTypeOf<[F64Tensor, F64MemRef]>:$input);
+    let arguments = (ins AnyTypeOf<[F32Tensor, F32MemRef]>:$input);
 
     let assemblyFormat = "$input attr-dict `:` type($input)";
 }

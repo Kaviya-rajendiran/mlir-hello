@@ -23,7 +23,7 @@
 #include "mlir/Pass/Pass.h"
 
 namespace hello {
-  std::unique_ptr<mlir::Pass> createLowerToAffinePass();
+  std::unique_ptr<mlir::Pass> createLowerToTosaPass();
   std::unique_ptr<mlir::Pass> createLowerToLLVMPass();
 }
 
